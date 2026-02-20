@@ -1,0 +1,35 @@
+name: Build Windows EXE
+
+on:
+  push:
+    # Trigger on changes to C++ source files
+    paths:
+      - '**/*.cpp'
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Use Ubuntu runner to cross‑compile for Windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install MinGW cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+
+      - name: Compile to Windows executable
+        # Compile the first C++ file found in the repo (or specify explicitly)
+        run: |
+          # Find the .cpp file to build; adjust if you have multiple sources
+          SRC_FILE=$(git ls-files '*.cpp' | head -n1)
+          echo "Compiling $SRC_FILE"
+          x86_64-w64-mingw32-g++ -static -O2 "$SRC_FILE" -municode -mwindows -lcomctl32 -lgdi32 -o EnergyReport.exe
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: EnergyReport
+          path: EnergyReport.exe
