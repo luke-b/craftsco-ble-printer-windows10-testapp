@@ -17,6 +17,9 @@
 #include <ctime>
 #include <sstream>
 #include <iomanip>
+// Added includes for math functions (sin, cos, ceil) and sorting
+#include <cmath>
+#include <algorithm>
 
 // Link common controls library
 #pragma comment(lib, "comctl32.lib")
@@ -24,7 +27,8 @@
 // ---- RNG implementation matching JS/Swift version ----
 class SeededRNG {
 public:
-    explicit SeededRNG(uint64_t seed) : state(seed & ((1ULL << 64) - 1)) {}
+    // Initialize state directly from seed. Avoid shifting 1ULL by 64 which would overflow.
+    explicit SeededRNG(uint64_t seed) : state(seed) {}
     // Linear congruential generator constants as in JS/Swift code
     uint64_t next() {
         const uint64_t a = 6364136223846793005ULL;
@@ -77,7 +81,7 @@ EnergyDay simulateEnergyDay() {
         else if (h < 8) base = baseNight + 3.0;
         else if (h <= 18) base = baseWork;
         else base = baseEvening;
-        double wave = (h >= 8 && h <= 18) ? (7.0 * sin((h - 8.0) / 10.0 * 3.14159265358979323846)) : 0.0;
+        double wave = (h >= 8 && h <= 18) ? (7.0 * std::sin((h - 8.0) / 10.0 * 3.14159265358979323846)) : 0.0;
         double noise = (rng.nextDouble01() - 0.5) * 2.0;
         double spike = (rng.nextDouble01() < 0.08) ? (5.0 + rng.nextDouble01() * 10.0) : 0.0;
         double kWh = std::max(3.0, base + wave + noise + spike);
@@ -281,7 +285,7 @@ void DrawLineChart(HDC hdc, RECT& area) {
     Rectangle(hdc, plot.left, plot.top, plot.right, plot.bottom);
     double maxV = 10.0;
     for (double v : g_day.hourlyKWh) if (v > maxV) maxV = v;
-    double yMax = ceil(maxV / 5.0) * 5.0;
+    double yMax = std::ceil(maxV / 5.0) * 5.0;
     // horizontal grid and labels
     HPEN gridPen = CreatePen(PS_SOLID, 1, RGB(200,200,200));
     oldPen = (HPEN)SelectObject(hdc, gridPen);
@@ -428,9 +432,9 @@ void DrawPieChart(HDC hdc, RECT& area) {
         HPEN slicePen = CreatePen(PS_SOLID, 1, RGB(0,0,0));
         HPEN oldP = (HPEN)SelectObject(hdc, slicePen);
         // draw pie slice using Pie function
-        Pie(hdc, cx - radius, cy - radius, cx + radius, cy + radius,
-            cx + (int)(radius * cos(currentAngle)), cy + (int)(radius * sin(currentAngle)),
-            cx + (int)(radius * cos(endAngle)), cy + (int)(radius * sin(endAngle)));
+            Pie(hdc, cx - radius, cy - radius, cx + radius, cy + radius,
+            cx + (int)(radius * std::cos(currentAngle)), cy + (int)(radius * std::sin(currentAngle)),
+            cx + (int)(radius * std::cos(endAngle)), cy + (int)(radius * std::sin(endAngle)));
         SelectObject(hdc, oldP);
         DeleteObject(slicePen);
         SelectObject(hdc, oldBrush);
