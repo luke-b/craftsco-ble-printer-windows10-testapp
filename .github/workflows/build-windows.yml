@@ -13,7 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        # Use the latest major version of checkout action
+        # https://github.com/actions/checkout
+        uses: actions/checkout@v4
 
       - name: Install MinGW cross compiler
         run: |
@@ -29,7 +31,9 @@ jobs:
           x86_64-w64-mingw32-g++ -static -O2 "$SRC_FILE" -municode -mwindows -lcomctl32 -lgdi32 -o EnergyReport.exe
 
       - name: Upload executable artifact
-        uses: actions/upload-artifact@v3
+        # v3 of upload-artifact is deprecated and disabled as of January 30 2025【964229395070554†L28-L31】.
+        # Use the v4 release which improves performance and must be paired with download-artifact@v4【146753986736196†L677-L680】.
+        uses: actions/upload-artifact@v4
         with:
           name: EnergyReport
           path: EnergyReport.exe
