@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>Energetický report – tiskárna</title>
+    <style>
+        /* Základní vzhled UI pro podrobné náhledy a tlačítko */
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #f9f9f9;
+            color: #333;
+        }
+        header {
+            padding: 1rem;
+            background: #00538a;
+            color: white;
+            text-align: center;
+            font-size: 1.2rem;
+        }
+        main {
+            padding: 1rem;
+            max-width: 800px;
+            margin: auto;
+        }
+        #preview {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        #preview canvas {
+            border: 1px solid #ccc;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        #controls {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 1rem;
+        }
+        button {
+            font-size: 1rem;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 4px;
+            background: #007acc;
+            color: white;
+            cursor: pointer;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button:disabled {
+            background: #aaa;
+            cursor: default;
+        }
+        #log {
+            background: #eef5fa;
+            border: 1px solid #ccdce6;
+            border-radius: 4px;
+            padding: 0.5rem;
+            font-family: monospace;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <header>Energetický report – tisk na minitiskárně</header>
+    <main>
+        <div id="preview"></div>
+        <div id="controls">
+            <button id="btnConnect">Připojit a tisknout</button>
+        </div>
+        <div id="log"></div>
+    </main>
+    <script>
+    // Konfigurační parametry – upravitelné podle modelu tiskárny
+    const config = {
+        deviceNamePrefix: 'Fichero',
+        // GATT služby používané tiskárnou. WebBluetooth vyžaduje plný 128bit UUID nebo 16bit alias s prefixem 0x.
+        serviceUUIDs: [
+            // 16bit alias 0x18f0 jako plný 128bit UUID (Bluetooth base UUID)
+            '000018f0-0000-1000-8000-00805f9b34fb',
+            // Vlastní služba tiskárny (přenesená do malých písmen pro WebBluetooth)
+            'e7810a71-73ae-499d-8c15-faa9aef0c3f2'
+        ],
+        writeCharacteristicUUIDs: [
+            '2AF1',
+            'BEF8D6C9-9C21-4C9E-B632-BD58C1009F9F'
+        ],
+        rollWidth: 384, // šířka tiskového role v pixelech (8-bit pásmo)
+        chunkSize: 120, // počet bajtů na jeden zápis do BLE
+        interChunkDelay: 20, // prodleva mezi chunky v milisekundách
+        feedLinesBetweenSections: 12,
+        feedLinesEnd: 40,
+        dithering: true,
+        threshold: 160
+    };
+
+    /**
+     * Jednoduchý generátor náhodných čísel se seedem (64bit multiplikativní)
+     * – shoduje se s implementací ve Swiftu pro konzistenci reportu.
+     */
+    class SeededRNG {
+        constructor(seed) {
+            // maska pro 64bit overflow
+            this.mask = (1n << 64n) - 1n;
+            this.state = BigInt(seed) & this.mask;
+        }
+        next() {
+            // konstanty viz Swift implementace
+            const a = 6364136223846793005n;
+            const c = 1n;
+            this.state = (this.state * a + c) & this.mask;
+            return this.state;
+        }
+        nextDouble01() {
+            // vezmeme horních 53 bitů a škálujeme na [0,1)
+            const v = this.next() >> 11n;
+            return Number(v) / Number(1n << 53n);
+        }
+    }
+
+    /**
+     * Vygeneruje datovou strukturu pro jeden den – stavy spotřeby, top spotřebiče a kategorie.
+     */
+    function simulateEnergyDay() {
+        const rng = new SeededRNG(0xC0FFEE);
+        const buildingName = 'Kancelářská budova A (menší)';
+        const date = new Date();
+        const price = 3.20; // Kč/kWh
+
+        const hourly = [];
+        for (let h = 0; h < 24; h++) {
+            const hour = h;
+            const baseNight = 6.5;
+            const baseWork = 16.0;
+            const baseEvening = 10.0;
+            let base;
+            if (h < 6 || h >= 23) base = baseNight;
+            else if (h < 8) base = baseNight + 3.0;
+            else if (h <= 18) base = baseWork;
+            else base = baseEvening;
+            const wave = (h >= 8 && h <= 18) ? (7.0 * Math.sin((hour - 8) / 10.0 * Math.PI)) : 0.0;
+            const noise = (rng.nextDouble01() - 0.5) * 2.0;
+            const spike = (rng.nextDouble01() < 0.08) ? (5.0 + rng.nextDouble01() * 10.0) : 0.0;
+            const kWh = Math.max(3.0, base + wave + noise + spike);
+            hourly.push(kWh);
+        }
+        const total = hourly.reduce((a, b) => a + b, 0);
+        const categoriesDef = [
+            ['HVAC (chlazení + VZT)', 0.42],
+            ['Osvětlení', 0.22],
+            ['IT + serverovna', 0.18],
+            ['Zásuvky / kuchyňky', 0.10],
+            ['Ostatní', 0.08]
+        ];
+        const categoryBreakdown = categoriesDef.map(([name, share]) => {
+            return { name, kWh: total * share };
+        });
+        const topDef = [
+            ['Chiller / tepelné čerpadlo', 0.22],
+            ['VZT jednotky', 0.17],
+            ['Osvětlení open-space', 0.15],
+            ['Serverovna UPS', 0.14],
+            ['EV nabíjení', 0.10],
+            ['Výtahy', 0.05],
+            ['Ostatní', 0.17]
+        ];
+        let topConsumers = topDef.map(([name, share]) => ({ name, kWh: total * share }));
+        topConsumers.sort((a, b) => b.kWh - a.kWh);
+        topConsumers = topConsumers.slice(0, 6);
+        return {
+            buildingName,
+            date,
+            hourlyKWh: hourly,
+            topConsumers,
+            categoryBreakdown,
+            priceCZKPerKWh: price
+        };
+    }
+
+    // Utility: přidá zprávu do logu
+    function logMsg(msg) {
+        const log = document.getElementById('log');
+        const line = document.createElement('div');
+        line.textContent = msg;
+        log.appendChild(line);
+        // automatický scroll dolů
+        log.scrollTop = log.scrollHeight;
+    }
+
+    // Časová osa pro pěkné datum v CZ formátu
+    function formatDate(date) {
+        return date.toLocaleDateString('cs-CZ', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    }
+
+    /**
+     * Renderer pro titulní část reportu
+     */
+    function renderHeader(day) {
+        const width = config.rollWidth;
+        const height = 190;
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        // background
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        // Title
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillStyle = '#000000';
+        ctx.fillText('Denní energetický report', 16, 30);
+        // horizontal line
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(16, 38);
+        ctx.lineTo(width - 16, 38);
+        ctx.stroke();
+        // Building and date
+        ctx.font = 'bold 14px sans-serif';
+        ctx.fillText(day.buildingName, 16, 60);
+        ctx.font = '12px sans-serif';
+        ctx.fillText('Datum: ' + formatDate(day.date), 16, 78);
+        // summary box
+        const boxX = 16;
+        const boxY = 96;
+        const boxW = width - 32;
+        const boxH = 78;
+        ctx.strokeRect(boxX, boxY, boxW, boxH);
+        const total = day.hourlyKWh.reduce((a, b) => a + b, 0);
+        const cost = total * day.priceCZKPerKWh;
+        const peak = Math.max(...day.hourlyKWh);
+        const peakHour = day.hourlyKWh.findIndex(v => v === peak);
+        ctx.font = 'bold 14px sans-serif';
+        ctx.fillText(`Celkem: ${total.toFixed(1)} kWh`, boxX + 10, boxY + 20);
+        ctx.font = '12px sans-serif';
+        ctx.fillText(`Odhad nákladů: ${cost.toFixed(0)} Kč (${day.priceCZKPerKWh.toFixed(2)} Kč/kWh)`, boxX + 10, boxY + 40);
+        ctx.fillText(`Špička: ${peak.toFixed(1)} kWh @ ${String(peakHour).padStart(2, '0')}:00`, boxX + 10, boxY + 60);
+        return canvas;
+    }
+
+    /**
+     * Renderer pro čárový graf (časová osa)
+     */
+    function renderLineChart(day) {
+        const width = config.rollWidth;
+        const height = 260;
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        // title
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillStyle = '#000000';
+        ctx.fillText('Časová osa (kWh/h)', 16, 30);
+        ctx.beginPath();
+        ctx.moveTo(16, 38);
+        ctx.lineTo(width - 16, 38);
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
+        // plot area
+        const plot = { x: 36, y: 60, w: width - 52, h: 150 };
+        ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+        const maxV = Math.max(10.0, Math.max(...day.hourlyKWh));
+        const yMax = Math.ceil(maxV / 5.0) * 5.0;
+        // horizontal grid and labels
+        ctx.font = '12px monospace';
+        ctx.fillStyle = '#000000';
+        for (let i = 0; i <= 5; i++) {
+            const y = plot.y + plot.h * i / 5;
+            ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+            ctx.lineWidth = 0.5;
+            ctx.beginPath();
+            ctx.moveTo(plot.x, y);
+            ctx.lineTo(plot.x + plot.w, y);
+            ctx.stroke();
+            const val = yMax * (1 - i / 5);
+            ctx.fillText(val.toFixed(0), plot.x - 8, y - 2);
+        }
+        // x ticks
+        const ticks = [0, 6, 12, 18, 23];
+        ticks.forEach(t => {
+            const x = plot.x + plot.w * t / 23;
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(x, plot.y + plot.h);
+            ctx.lineTo(x, plot.y + plot.h + 4);
+            ctx.stroke();
+            ctx.fillText(String(t).padStart(2, '0'), x - 8, plot.y + plot.h + 16);
+        });
+        // line
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        day.hourlyKWh.forEach((val, h) => {
+            const x = plot.x + plot.w * h / 23;
+            const y = plot.y + plot.h * (1 - (val / yMax));
+            if (h === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        // peak marker
+        const peak = Math.max(...day.hourlyKWh);
+        const peakHour = day.hourlyKWh.findIndex(v => v === peak);
+        const px = plot.x + plot.w * peakHour / 23;
+        const py = plot.y + plot.h * (1 - (peak / yMax));
+        ctx.fillStyle = '#000000';
+        ctx.beginPath();
+        ctx.arc(px, py, 3, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.font = '12px monospace';
+        ctx.fillText(`peak ${peak.toFixed(1)}`, px + 6, py - 6);
+        return canvas;
+    }
+
+    /**
+     * Renderer pro sloupcový graf Top spotřebičů
+     */
+    function renderBarChart(day) {
+        const width = config.rollWidth;
+        const height = 250;
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillStyle = '#000000';
+        ctx.fillText('Top spotřebiče (kWh/den)', 16, 30);
+        ctx.beginPath();
+        ctx.moveTo(16, 38);
+        ctx.lineTo(width - 16, 38);
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
+        const items = day.topConsumers;
+        const maxV = Math.max(1.0, Math.max(...items.map(it => it.kWh)));
+        const leftLabelX = 16;
+        const barX = 170;
+        const barW = width - barX - 16;
+        let y = 60;
+        ctx.font = '12px monospace';
+        items.forEach((it, i) => {
+            // name
+            ctx.fillStyle = '#000000';
+            ctx.fillText(it.name, leftLabelX, y + 14);
+            // bar outline
+            ctx.strokeStyle = '#000000';
+            ctx.strokeRect(barX, y, barW, 18);
+            // bar fill
+            const w = barW * (it.kWh / maxV);
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(barX, y, w, 18);
+            // value on right
+            ctx.fillStyle = '#000000';
+            const text = it.kWh.toFixed(1);
+            const textWidth = ctx.measureText(text).width;
+            ctx.fillText(text, width - 16 - textWidth, y + 14);
+            // separator
+            if (i < items.length - 1) {
+                ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(16, y + 26);
+                ctx.lineTo(width - 16, y + 26);
+                ctx.stroke();
+            }
+            y += 28;
+        });
+        return canvas;
+    }
+
+    /**
+     * Renderer pro koláčový graf s texturou
+     */
+    function renderPieChart(day) {
+        const width = config.rollWidth;
+        const height = 300;
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillStyle = '#000000';
+        ctx.fillText('Rozpad kategorií (podíl)', 16, 30);
+        ctx.beginPath();
+        ctx.moveTo(16, 38);
+        ctx.lineTo(width - 16, 38);
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
+        const total = Math.max(1.0, day.categoryBreakdown.reduce((a, b) => a + b.kWh, 0));
+        const centerX = 100;
+        const centerY = 170;
+        const radius = 70;
+        let startAngle = -Math.PI / 2;
+        // patterns
+        const patterns = [];
+        // create simple 4 styles: diagonal, reverse diagonal, horizontal, vertical
+        for (let idx = 0; idx < 4; idx++) {
+            const pCanvas = document.createElement('canvas');
+            pCanvas.width = 8;
+            pCanvas.height = 8;
+            const pCtx = pCanvas.getContext('2d');
+            pCtx.strokeStyle = '#000000';
+            pCtx.lineWidth = 1;
+            if (idx === 0) {
+                for (let x = -8; x < 16; x += 4) {
+                    pCtx.beginPath();
+                    pCtx.moveTo(x, 8);
+                    pCtx.lineTo(x + 8, 0);
+                    pCtx.stroke();
+                }
+            } else if (idx === 1) {
+                for (let x = 0; x < 16; x += 4) {
+                    pCtx.beginPath();
+                    pCtx.moveTo(x, 0);
+                    pCtx.lineTo(x - 8, 8);
+                    pCtx.stroke();
+                }
+            } else if (idx === 2) {
+                for (let y = 0; y < 8; y += 4) {
+                    pCtx.beginPath();
+                    pCtx.moveTo(0, y);
+                    pCtx.lineTo(8, y);
+                    pCtx.stroke();
+                }
+            } else {
+                for (let x = 0; x < 8; x += 4) {
+                    pCtx.beginPath();
+                    pCtx.moveTo(x, 0);
+                    pCtx.lineTo(x, 8);
+                    pCtx.stroke();
+                }
+            }
+            patterns.push(ctx.createPattern(pCanvas, 'repeat'));
+        }
+        day.categoryBreakdown.forEach((cat, idx) => {
+            const frac = cat.kWh / total;
+            const endAngle = startAngle + frac * 2 * Math.PI;
+            ctx.beginPath();
+            ctx.moveTo(centerX, centerY);
+            ctx.arc(centerX, centerY, radius, startAngle, endAngle);
+            ctx.closePath();
+            ctx.fillStyle = patterns[idx % patterns.length];
+            ctx.fill();
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            startAngle = endAngle;
+        });
+        // legend
+        ctx.font = '12px monospace';
+        let y = 90;
+        day.categoryBreakdown.forEach((cat, idx) => {
+            ctx.strokeStyle = '#000000';
+            ctx.strokeRect(200, y, 12, 12);
+            // index inside box
+            ctx.fillStyle = '#000000';
+            ctx.fillText(String(idx + 1), 200 + 3, y + 10);
+            const pct = 100 * (cat.kWh / total);
+            ctx.fillText(`${idx + 1}) ${cat.name}  ${pct.toFixed(0)}%`, 218, y + 10);
+            y += 22;
+        });
+        ctx.fillText('Pozn.: vzory = index 1..N', 200, y + 4);
+        return canvas;
+    }
+
+    /**
+     * Renderer pro tabulku top hodin
+     */
+    function renderTable(day) {
+        const width = config.rollWidth;
+        const height = 320;
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillStyle = '#000000';
+        ctx.fillText('Tabulka (výběr hodin)', 16, 30);
+        ctx.beginPath();
+        ctx.moveTo(16, 38);
+        ctx.lineTo(width - 16, 38);
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
+        const total = day.hourlyKWh.reduce((a, b) => a + b, 0);
+        const avg = total / 24.0;
+        ctx.font = '12px monospace';
+        ctx.fillText(`Průměr: ${avg.toFixed(1)} kWh/h   Cena: ${day.priceCZKPerKWh.toFixed(2)} Kč/kWh`, 16, 52);
+        // top 10
+        const indexed = day.hourlyKWh.map((v, idx) => ({ hour: idx, v }));
+        const top10 = indexed.sort((a, b) => b.v - a.v).slice(0, 10);
+        // header row
+        const colX = [16, 80, 160, 280];
+        const headerY = 78;
+        ctx.fillStyle = '#000000';
+        ctx.fillText('Hod', colX[0], headerY);
+        ctx.fillText('kWh', colX[1], headerY);
+        ctx.fillText('Kč', colX[2], headerY);
+        ctx.fillText('Pozn.', colX[3], headerY);
+        ctx.beginPath();
+        ctx.moveTo(16, headerY + 4);
+        ctx.lineTo(width - 16, headerY + 4);
+        ctx.stroke();
+        let y = headerY + 20;
+        top10.forEach((row, i) => {
+            const cost = row.v * day.priceCZKPerKWh;
+            ctx.fillText(String(row.hour).padStart(2, '0') + ':00', colX[0], y);
+            ctx.fillText(row.v.toFixed(1), colX[1], y);
+            ctx.fillText(cost.toFixed(0), colX[2], y);
+            const note = row.v > avg * 1.5 ? 'peak' : '';
+            ctx.fillText(note, colX[3], y);
+            if (i < top10.length - 1) {
+                ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+                ctx.beginPath();
+                ctx.moveTo(16, y + 4);
+                ctx.lineTo(width - 16, y + 4);
+                ctx.stroke();
+            }
+            y += 20;
+        });
+        ctx.fillText('Tip: nejvyšší hodiny často souvisí s HVAC/EV.', 16, height - 14);
+        return canvas;
+    }
+
+    /**
+     * Renderer pro checklist (alerts)
+     */
+    function renderChecklist(day) {
+        const width = config.rollWidth;
+        const height = 240;
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillStyle = '#000000';
+        ctx.fillText('Checklist / Alerts', 16, 30);
+        ctx.beginPath();
+        ctx.moveTo(16, 38);
+        ctx.lineTo(width - 16, 38);
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
+        const total = day.hourlyKWh.reduce((a, b) => a + b, 0);
+        const avg = total / 24.0;
+        const peak = Math.max(...day.hourlyKWh);
+        const nightAvg = day.hourlyKWh.slice(0, 6).reduce((a, b) => a + b, 0) / 6.0;
+        const nightHigh = nightAvg > avg * 0.75;
+        const alerts = [
+            { text: 'Noční zátěž v normě', ok: !nightHigh },
+            { text: 'Žádná extrémní špička (> 2.0× průměr)', ok: !(peak > avg * 2.0) },
+            { text: 'Křivka bez výpadků (24/24)', ok: day.hourlyKWh.length === 24 },
+            { text: 'Doporučení: zkontrolovat HVAC plán', ok: true },
+            { text: 'Doporučení: audit osvětlení (zóny)', ok: true }
+        ];
+        let y = 60;
+        ctx.font = '13px sans-serif';
+        alerts.forEach(({ text, ok }) => {
+            // checkbox
+            ctx.strokeStyle = '#000000';
+            ctx.strokeRect(16, y + 2, 12, 12);
+            if (ok) {
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(18, y + 9);
+                ctx.lineTo(21, y + 13);
+                ctx.lineTo(27, y + 3);
+                ctx.stroke();
+            } else {
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(18, y + 3);
+                ctx.lineTo(27, y + 13);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(27, y + 3);
+                ctx.lineTo(18, y + 13);
+                ctx.stroke();
+            }
+            ctx.lineWidth = 1;
+            ctx.fillStyle = ok ? '#000000' : '#000000';
+            if (!ok) ctx.font = 'bold 13px sans-serif';
+            else ctx.font = '13px sans-serif';
+            ctx.fillText(text, 36, y + 12);
+            y += 26;
+        });
+        return canvas;
+    }
+
+    // Funkce pro vykreslení náhledů do DOM
+    function showPreview(images) {
+        const preview = document.getElementById('preview');
+        preview.innerHTML = '';
+        images.forEach(canvas => {
+            preview.appendChild(canvas);
+        });
+    }
+
+    // Bayerova matice 4x4 pro dithering
+    const bayer4x4 = [
+        [0, 8, 2, 10],
+        [12, 4, 14, 6],
+        [3, 11, 1, 9],
+        [15, 7, 13, 5]
+    ];
+
+    /**
+     * Převede canvas na 1bit bitmapu v pořadí MSB první; podporuje dithering
+     */
+    function imageTo1bppMSB(canvas, dithering, threshold) {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+        const imgData = ctx.getImageData(0, 0, w, h).data;
+        const widthBytes = Math.ceil(w / 8);
+        const bytes = new Uint8Array(widthBytes * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const idx = (y * w + x) * 4;
+                const r = imgData[idx];
+                const g = imgData[idx + 1];
+                const b = imgData[idx + 2];
+                const lum = (299 * r + 587 * g + 114 * b) / 1000;
+                let t = threshold;
+                if (dithering) {
+                    const d = bayer4x4[y & 3][x & 3];
+                    t = threshold + (d * 8 - 48);
+                }
+                if (lum < t) {
+                    const byteIndex = y * widthBytes + (x >> 3);
+                    const bit = 7 - (x & 7);
+                    bytes[byteIndex] |= (1 << bit);
+                }
+            }
+        }
+        return { w, h, bytes };
+    }
+
+    function escPosInitialize() {
+        return new Uint8Array([0x1B, 0x40]);
+    }
+    function escPosFeed(lines) {
+        return new Uint8Array([0x1B, 0x64, lines]);
+    }
+    function rasterGSv0(canvas, mode = 0) {
+        const { w, h, bytes } = imageTo1bppMSB(canvas, config.dithering, config.threshold);
+        const widthBytes = Math.ceil(w / 8);
+        const xL = widthBytes & 0xff;
+        const xH = (widthBytes >> 8) & 0xff;
+        const yL = h & 0xff;
+        const yH = (h >> 8) & 0xff;
+        const header = [0x1D, 0x76, 0x30, mode, xL, xH, yL, yH];
+        const out = new Uint8Array(header.length + bytes.length);
+        out.set(header, 0);
+        out.set(bytes, header.length);
+        return out;
+    }
+
+    /**
+     * Posílá data na charakteristiku po kouscích a čeká mezi nimi
+     */
+    async function writeChunks(characteristic, data, chunkSize, withResponse) {
+        let offset = 0;
+        while (offset < data.length) {
+            const end = Math.min(data.length, offset + chunkSize);
+            const chunk = data.slice(offset, end);
+            try {
+                if (withResponse) {
+                    await characteristic.writeValue(chunk);
+                } else {
+                    await characteristic.writeValueWithoutResponse(chunk);
+                }
+            } catch (err) {
+                logMsg('Chyba při zápisu: ' + err);
+                throw err;
+            }
+            offset = end;
+            // čekání mezi chunky
+            await new Promise(resolve => setTimeout(resolve, config.interChunkDelay));
+        }
+    }
+
+    /**
+     * Kompletní tiskový proces: připraví report, spojí se s tiskárnou a odešle bitmapy
+     */
+    async function connectAndPrint() {
+        const btn = document.getElementById('btnConnect');
+        btn.disabled = true;
+        try {
+            logMsg('Simulace dat…');
+            const day = simulateEnergyDay();
+            logMsg('Generuji náhledy…');
+            const canvases = [
+                renderHeader(day),
+                renderLineChart(day),
+                renderBarChart(day),
+                renderPieChart(day),
+                renderTable(day),
+                renderChecklist(day)
+            ];
+            showPreview(canvases);
+            // Připravíme si ESC/POS packety
+            logMsg('Příprava ESC/POS paketů…');
+            const packets = [];
+            packets.push({ data: escPosInitialize(), withResponse: true });
+            canvases.forEach((canvas, idx) => {
+                const raster = rasterGSv0(canvas, 0);
+                packets.push({ data: raster, withResponse: false });
+                packets.push({ data: escPosFeed(config.feedLinesBetweenSections), withResponse: true });
+            });
+            packets.push({ data: escPosFeed(config.feedLinesEnd), withResponse: true });
+            // WebBluetooth: vyžádáme zařízení
+            logMsg('Vyžádání zařízení Bluetooth…');
+            const filters = [];
+            if (config.deviceNamePrefix) {
+                filters.push({ namePrefix: config.deviceNamePrefix });
+            }
+            // Android často vyžaduje alespoň jeden filter, proto fallback na none
+            const options = {
+                filters: filters.length > 0 ? filters : undefined,
+                optionalServices: config.serviceUUIDs.map(u => u.toLowerCase())
+            };
+            const device = await navigator.bluetooth.requestDevice(options);
+            logMsg('Zařízení vybráno: ' + (device.name || device.id));
+            const server = await device.gatt.connect();
+            logMsg('Připojeno k GATT serveru.');
+            // najdeme write charakteristiku
+            let char = null;
+            for (const svcUUID of config.serviceUUIDs) {
+                try {
+                    const service = await server.getPrimaryService(svcUUID.toLowerCase());
+                    // pro každou definovanou char UUID zkoušíme načíst
+                    for (const chUUID of config.writeCharacteristicUUIDs) {
+                        try {
+                            const characteristic = await service.getCharacteristic(chUUID.toLowerCase());
+                            // zkontrolujeme vlastnosti
+                            const props = characteristic.properties;
+                            if (props.write || props.writeWithoutResponse) {
+                                char = { characteristic, withResponse: props.write && !props.writeWithoutResponse };
+                                break;
+                            }
+                        } catch (ex) {
+                            // ignorujeme neshodu
+                        }
+                    }
+                    if (char) break;
+                    // fallback: vezmeme první charakteristiku s write povolením
+                    const characteristics = await service.getCharacteristics();
+                    for (const characteristic of characteristics) {
+                        const props = characteristic.properties;
+                        if (props.write || props.writeWithoutResponse) {
+                            char = { characteristic, withResponse: props.write && !props.writeWithoutResponse };
+                            break;
+                        }
+                    }
+                    if (char) break;
+                } catch (ex) {
+                    // service nenalezen – pokračujeme
+                }
+            }
+            if (!char) {
+                throw new Error('Nenašla se žádná write charakteristika.');
+            }
+            logMsg('Write charakteristika nalezena.');
+            // posíláme paket za paketem
+            for (let i = 0; i < packets.length; i++) {
+                const packet = packets[i];
+                logMsg(`Odesílám paket ${i + 1}/${packets.length} (${packet.data.length} B)…`);
+                await writeChunks(char.characteristic, packet.data, config.chunkSize, packet.withResponse);
+            }
+            logMsg('Hotovo – report odeslán.');
+        } catch (err) {
+            logMsg('Chyba: ' + err.message);
+            console.error(err);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    // Událost po načtení stránky – připravíme náhledy a navážeme kliknutí
+    window.addEventListener('load', () => {
+        const day = simulateEnergyDay();
+        const canvases = [
+            renderHeader(day),
+            renderLineChart(day),
+            renderBarChart(day),
+            renderPieChart(day),
+            renderTable(day),
+            renderChecklist(day)
+        ];
+        showPreview(canvases);
+        document.getElementById('btnConnect').addEventListener('click', connectAndPrint);
+    });
+    </script>
+</body>
+</html>
