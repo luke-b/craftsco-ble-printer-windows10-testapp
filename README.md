@@ -1,33 +1,48 @@
-# Craftsco BLE Printer Windows 10 Test App
+# ⚡ Energy Report GUI - Windows 10 BLE Thermal Printer Integration
 
-Welcome to the Craftsco BLE Printer Windows 10 Test Application. This application allows you to connect and interact with the Craftsco BLE printer directly from your Windows 10 device.
+A **self-contained C++ WinAPI application** that generates beautiful daily energy consumption reports with multiple chart types and thermal printer output support.
 
-## Features
-- **Connect to BLE Printer:** Establish connection effortlessly with nearby Craftsco printers.
-- **Print Documents:** Send documents for printing without delay.
-- **Monitor Status:** Real-time status updates of the printer's condition.
+## 🎯 Features
 
-## Installation
-1. Download the ZIP file from the [releases](link-to-your-releases) section.
-2. Unzip the file and run `setup.exe`.
-3. Follow the instructions on the installation wizard.
+- **Multi-Chart Visualization** - Display energy data in 5 different ways:
+  - 📈 **Line Chart** - Hourly consumption timeline with peak detection
+  - 📊 **Bar Chart** - Top 6 power consumers ranked by consumption
+  - 🥧 **Pie Chart** - Category breakdown with patterned slices
+  - 📋 **Data Table** - Top 10 hours with costs and annotations
+  - ✅ **Checklist/Alerts** - Energy health indicators & recommendations
 
-## Usage
-- Launch the application from the Start menu.
-- Click on the 'Connect' button to find nearby printers.
-- Once connected, select the document you wish to print and hit ‘Print’.
+- **Realistic Simulation** - Generates reproducible daily energy data:
+  - 24-hour consumption curves with natural patterns
+  - Night, work, and evening load profiles
+  - HVAC, lighting, IT, and EV charging distributions
+  - Random noise and demand spikes
 
-## Troubleshooting
-- Ensure Bluetooth is enabled on your device.
-- Restart the application if you experience connectivity issues.
+- **Thermal Printer Ready** - ESC/POS command generation (stub):
+  - Framework for Bluetooth LE printer integration
+  - Easy to extend for actual device printing
 
-## Contribution
-We welcome contributions! Please feel free to submit a pull request or raise an issue if you have suggestions.
+- **Czech Localization** - All UI text in Czech with support for CZK pricing
 
-## License
-This project is licensed under the MIT License. See the LICENSE file for more details.
+## 🏗️ Architecture
 
-## Contact
-For any inquiries, feel free to reach out to [support@craftsco.com](mailto:support@craftsco.com).
+### Core Components
 
-Happy Printing!
+| Component | Purpose |
+|-----------|---------|
+| `SeededRNG` | Linear congruential generator for reproducible randomness |
+| `EnergyDay` | Data structure holding hourly consumption, consumers, categories |
+| `simulateEnergyDay()` | Generates realistic daily energy patterns |
+| Drawing Functions | WinAPI rendering for each chart type |
+| `PrintReport()` | ESC/POS stub for thermal printer output |
+
+### Data Structure
+
+```cpp
+struct EnergyDay {
+    std::string buildingName;          // Building identifier
+    SYSTEMTIME date;                   // Report date
+    std::vector<double> hourlyKWh;     // 24 hourly readings
+    std::vector<Consumer> topConsumers; // Top 6 power users
+    std::vector<Category> categoryBreakdown; // 5 energy categories
+    double priceCZKPerKWh;             // Energy pricing
+};
